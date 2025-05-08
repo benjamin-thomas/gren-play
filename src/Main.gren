@@ -1,0 +1,14 @@
+module Main exposing (main)
+
+import Init
+import Node exposing (Environment)
+import Task
+
+main : Node.SimpleProgram a
+main =
+    Node.defineSimpleProgram init
+
+init : Environment -> Init.Task (Cmd a)
+init env =
+    Task.succeed 42
+    |> Node.endSimpleProgram
