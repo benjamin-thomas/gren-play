@@ -1,4 +1,4 @@
-module Main3 exposing (main)
+module Main3 exposing (..)
 
 import Init
 import Node exposing (Environment)
@@ -9,8 +9,9 @@ import Process
 import Dict exposing (Dict)
 import HttpServer exposing (Request, Server)
 import HttpServer.Response as Response exposing (Response)
-import Url.Parser as P exposing ((</>))
+import Url.Parser as P exposing ((</>), (<?>))
 import Url exposing (Url)
+import Url.Parser.Query as Query
 
 {-
 
@@ -47,19 +48,31 @@ puts str stdout =
 
 type Route
     = Home
-    | Blog Int
+    | Blogs
+    | Blog { id : Int, subSectionId : Maybe Int, other : Bool }
 
 routeParser : P.Parser (Route -> a) a
 routeParser =
     P.oneOf
-        [ P.map Home P.top
-        , P.map Blog (P.s "blog" </> P.int)
+        [ P.map Home  (P.top)
+        , P.map Blogs (P.s "blog")
+        , P.map
+            (\id subSectionId other ->
+                Blog
+                    { id = id
+                    , subSectionId = Maybe.andThen String.toInt subSectionId
+                    , other = when other is
+                        Just "1" -> True
+                        _ -> False
+                    }
+            )
+            (P.s "blog" </> P.int <?> Query.string "q" <?> Query.string "r")
         ]
 
 
 urlToRoute : Url -> Maybe Route
 urlToRoute url =
-    P.parse routeParser url
+    P.parse routeParser (urlFix url)
 
 type Model
     = StartingUp { port_ : Int, stdout : Stream.Writable Bytes }
@@ -82,6 +95,23 @@ main =
         , update = update
         , subscriptions = subscriptions
         }
+
+
+urlFix : Url -> Url
+urlFix url =
+    let
+        fix query =
+            Just <|
+                if String.startsWith "?" query then
+                    String.dropFirst 1 query
+                else
+                    query
+    in
+    when url.query is
+        Nothing ->
+            url
+        Just query ->
+            { url | query = fix query }
 
 subscriptions : Model -> Sub Msg
 subscriptions model =
@@ -136,9 +166,21 @@ homeResponse =
     Response.setBody "You requested: Home"
 
 
-blogResponse : Int -> Response -> Response
-blogResponse id =
-    Response.setBody ("You requested: Blog id " ++ String.fromInt id)
+blogsResponse : Response -> Response
+blogsResponse =
+    Response.setBody "You requested: Blogs"
+
+
+-- http -v localhost:4000/blog/1 q==42 r==1
+blogResponse : { id : Int, subSectionId : Maybe Int, other : Bool } -> Response -> Response
+blogResponse {id, subSectionId, other } =
+    let _ = Debug.log "blogResponse" {id = id, subSectionId = subSectionId, other = other } in
+    Response.setBody <|
+        "You requested: Blog id "
+        ++ String.fromInt id
+        ++ " (params="
+        ++ (Debug.toString {id = id, subSectionId = subSectionId, other = other })
+        ++ ")"
 
 
 serveRequest : Request -> Response -> Cmd Msg
@@ -152,7 +194,8 @@ serveRequest req res =
             Response.send <|
                 when route is
                     Home    -> homeResponse res
-                    Blog id -> blogResponse id res
+                    Blogs   -> blogsResponse res
+                    Blog params -> blogResponse params res
 
 
 update : Msg -> Model -> { model : Model, command : Cmd Msg }
@@ -177,7 +220,7 @@ update msg model =
 
                             }
                         Err error ->
-                            let _ = Debug.log "Server error" error in
+                            -- let _ = Debug.log "Server error" error in
                             { model = StartingUpFailed
                             , command =
                                 Task.succeed {}
@@ -188,9 +231,7 @@ update msg model =
 
                 _ -> noop
         GotRequest {req, res} ->
-            let
-                _ = Debug.log "Request" req
-            in
+            -- let _ = Debug.log "Request" req in
             { model = model
             , command = serveRequest req res
 
