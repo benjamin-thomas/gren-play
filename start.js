@@ -4,7 +4,7 @@ const main = require("./main.js");
 const app = main.Gren.Main3.init({})
 
 // Mock database function to simulate fetching users from a database
-function getDbUsers() {
+const getDbUsers = () => {
     // Return a fixed list of users for simplicity
     return [
         "John Doe",
@@ -16,20 +16,58 @@ function getDbUsers() {
     ];
 }
 
+const getDbUsersPromise = () => {
+    return new Promise((resolve) => {
+        setTimeout(() => {
+            resolve(getDbUsers());
+        }, 2000);
+    });
+}
+
+
 
 app.ports.getDbUsers.subscribe(({ requestId }) => {
     console.log(`[APP] DB START`, { requestId });
 
-    setTimeout(() => {
-        const users = getDbUsers();
+    const mode = "setTimeout";
 
-        const response = {
-            requestId,
-            users: users
-        };
+    if (mode === "sync") {
+        (() => {
+            const users = getDbUsers();
 
-        app.ports.gotDbUsers.send(response);
+            const response = {
+                requestId,
+                users: users
+            };
 
-        console.log(`[APP] DB END`);
-    }, 2000);
+            app.ports.gotDbUsers.send(response);
+
+            console.log(`[APP] DB END (sync)`);
+        })();
+    } else if (mode === "promise") {
+        getDbUsersPromise().then((users) => {
+            const response = {
+                requestId,
+                users: users
+            };
+
+            app.ports.gotDbUsers.send(response);
+
+            console.log(`[APP] DB END (promise)`);
+        });
+    } else if (mode === "setTimeout") {
+        setTimeout(() => {
+            const users = getDbUsers();
+
+            const response = {
+                requestId,
+                users: users
+            };
+
+            app.ports.gotDbUsers.send(response);
+
+            console.log(`[APP] DB END (setTimeout)`);
+        }, 2000);
+    }
+
 });
