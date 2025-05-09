@@ -9,6 +9,8 @@ import Process
 import Dict exposing (Dict)
 import HttpServer exposing (Request, Server)
 import HttpServer.Response as Response exposing (Response)
+import Url.Parser as P exposing ((</>))
+import Url exposing (Url)
 
 {-
 
@@ -43,13 +45,21 @@ puts str stdout =
     |> Task.onError (\_ -> Task.succeed {})
 
 
--- puts : String -> Stream.Writable Bytes -> Cmd Msg
--- puts str stdout =
---     Stream.writeLineAsBytes str stdout
---     |> Task.map (\_ -> {})
---     |> Task.onError (\_ -> Task.succeed {})
---     |> Task.execute
+type Route
+    = Home
+    | Blog Int
 
+routeParser : P.Parser (Route -> a) a
+routeParser =
+    P.oneOf
+        [ P.map Home P.top
+        , P.map Blog (P.s "blog" </> P.int)
+        ]
+
+
+urlToRoute : Url -> Maybe Route
+urlToRoute url =
+    P.parse routeParser url
 
 type Model
     = StartingUp { port_ : Int, stdout : Stream.Writable Bytes }
@@ -120,6 +130,31 @@ printServerSuccess2 stdout =
     |> Task.sequence
     |> Task.execute
 
+
+homeResponse : Response -> Response
+homeResponse =
+    Response.setBody "You requested: Home"
+
+
+blogResponse : Int -> Response -> Response
+blogResponse id =
+    Response.setBody ("You requested: Blog id " ++ String.fromInt id)
+
+
+serveRequest : Request -> Response -> Cmd Msg
+serveRequest req res =
+    when urlToRoute req.url is
+        Nothing ->
+            res
+            |> Response.setStatus 404
+            |> Response.send
+        Just route ->
+            Response.send <|
+                when route is
+                    Home    -> homeResponse res
+                    Blog id -> blogResponse id res
+
+
 update : Msg -> Model -> { model : Model, command : Cmd Msg }
 update msg model =
     let
@@ -153,12 +188,12 @@ update msg model =
 
                 _ -> noop
         GotRequest {req, res} ->
-            let _ = Debug.log "Request" req in
+            let
+                _ = Debug.log "Request" req
+            in
             { model = model
-            , command =
-                res
-                |> Response.setBody ("You requested: " ++ req.url.path)
-                |> Response.send
+            , command = serveRequest req res
+
             }
         NOOP ->
             noop
