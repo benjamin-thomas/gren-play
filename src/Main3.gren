@@ -14,14 +14,12 @@ import Url exposing (Url)
 import Url.Parser.Query as Query
 import Json.Decode as Decode exposing (Decoder)
 import Json.Encode as Encode
+import Time
 
-
--- Define RequestId as an opaque type (just a counter)
-type alias RequestId = Int
 
 -- Define a type for the response with users
 type alias UsersResponse =
-    { requestId : RequestId
+    { requestId : Int
     , users : Array String
     }
 
@@ -116,17 +114,23 @@ type Status
     | Running Server
 
 
+type alias PendingRequest =
+    { response : Response
+    , startedAt : Time.Posix
+    }
+
 type alias Model =
     { status : Status
     , stdout : Stream.Writable Bytes
-    , pendingRequests : Dict Int Response
+    , pendingRequests : Dict Int PendingRequest
     , nextRequestId : Int
     }
 
 
 type Msg
     = ServerCreated (Result HttpServer.ServerError Server)
-    | GotRequest { req : Request, res : Response }
+    | StartRequest { req : Request, res : Response }
+    | HandleRequest { req : Request, res : Response, now : Time.Posix }
     | GotDbUsers UsersResponse
 
 main : Node.Program Model Msg
@@ -149,7 +153,7 @@ subscriptions model =
                 Sub.none
             Running server ->
                 HttpServer.onRequest server
-                    (\req res -> GotRequest {req = req, res = res})
+                    (\req res -> StartRequest {req = req, res = res})
         ]
 
 init : Environment -> Init.Task { model : Model, command : Cmd Msg }
@@ -232,6 +236,20 @@ logMessage prefix message stdout =
     puts (prefix ++ " :: " ++ yellow ++ message ++ reset) stdout
     |> Task.execute
 
+evictStaleRequests : { now : Time.Posix } -> Dict Int PendingRequest -> Dict Int PendingRequest
+evictStaleRequests { now } =
+    let
+        oneMinute =  60000
+    in
+    Dict.foldl
+    (\k v acc ->
+        if Time.posixToMillis now - Time.posixToMillis v.startedAt > oneMinute then
+            acc
+        else
+            Dict.set k v acc
+    )
+    Dict.empty
+
 update : Msg -> Model -> { model : Model, command : Cmd Msg }
 update msg model =
     let
@@ -268,14 +286,26 @@ update msg model =
                             }
 
                 _ -> noop
-        GotRequest {req, res} ->
+
+        StartRequest { req, res } ->
+            { model = model
+            , command =
+                Task.perform
+                (\now -> HandleRequest {req = req, res = res, now = now})
+                Time.now
+            }
+
+        HandleRequest {req, res, now} ->
             let
+                newPendingRequests =
+                    Dict.set
+                        model.nextRequestId
+                        { response = res, startedAt = now}
+                        (model.pendingRequests |> evictStaleRequests { now = now })
+                
                 newModel =
                     { model | nextRequestId = model.nextRequestId + 1
-                    , pendingRequests = Dict.set
-                        model.nextRequestId
-                        res
-                        model.pendingRequests
+                    , pendingRequests = newPendingRequests
                     }
 
             in
@@ -304,8 +334,8 @@ update msg model =
 
                 closeHttpConnection =
                     when Dict.get requestId model.pendingRequests is
-                        Just res ->
-                            res
+                        Just {response} ->
+                            response
                             |> Response.setHeader "Content-Type" "application/json"
                             |> Response.setBody jsonResponse
                             |> Response.send
