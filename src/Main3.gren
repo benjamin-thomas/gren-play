@@ -72,7 +72,22 @@ routeParser =
 
 urlToRoute : Url -> Maybe Route
 urlToRoute url =
-    P.parse routeParser (urlFix url)
+    let
+        dropQuestion query
+            = Just <|
+                if String.startsWith "?" query then
+                    String.dropFirst 1 query
+                else
+                    query
+    in
+    P.parse
+        routeParser
+        (when url.query is
+            Nothing ->
+                url
+            Just query ->
+                { url | query = dropQuestion query }
+        )
 
 type Model
     = StartingUp { port_ : Int, stdout : Stream.Writable Bytes }
@@ -96,22 +111,6 @@ main =
         , subscriptions = subscriptions
         }
 
-
-urlFix : Url -> Url
-urlFix url =
-    let
-        fix query =
-            Just <|
-                if String.startsWith "?" query then
-                    String.dropFirst 1 query
-                else
-                    query
-    in
-    when url.query is
-        Nothing ->
-            url
-        Just query ->
-            { url | query = fix query }
 
 subscriptions : Model -> Sub Msg
 subscriptions model =
@@ -212,7 +211,11 @@ update msg model =
                             { model = Running server
                             , command =
                                 [ puts <| "Server booting up!"
-                                , puts <| "Listening on port " ++ blue ++ (String.fromInt port_) ++ reset ++ "!"
+                                , puts <| "Listening on port "
+                                       ++ blue
+                                       ++ (String.fromInt port_)
+                                       ++ reset
+                                       ++ "!"
                                 ]
                                 |> Array.map (\f -> f stdout)
                                 |> Task.sequence
@@ -231,7 +234,7 @@ update msg model =
 
                 _ -> noop
         GotRequest {req, res} ->
-            -- let _ = Debug.log "Request" req in
+            -- let _ = Debug.log "Request URL" req.url in
             { model = model
             , command = serveRequest req res
 
