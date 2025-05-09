@@ -2,13 +2,43 @@ module Main exposing (main)
 
 import Init
 import Node exposing (Environment)
-import Task
+import Task exposing (Task)
+import Stream
+import Bytes
 
 main : Node.SimpleProgram a
 main =
     Node.defineSimpleProgram init
 
+
 init : Environment -> Init.Task (Cmd a)
 init env =
-    Task.succeed 42
-    |> Node.endSimpleProgram
+    Task.succeed env.stdout
+        |> Task.andThen (Stream.writeLineAsBytes "AAA")
+        |> Task.andThen (Stream.writeLineAsBytes "BBB")
+        |> Task.andThen (Stream.writeLineAsBytes "CCC")
+        |> Task.andThen printManyTimes
+        |> Task.andThen printManyMoreTimes
+        |> Task.onError (\_ -> Task.succeed env.stdout)
+        |> Node.endSimpleProgram
+
+printManyTimes : Stream.Writable Bytes.Bytes -> Task Stream.Error (Stream.Writable Bytes.Bytes)
+printManyTimes stdout =
+    Array.foldl
+        Task.andThen
+        (Task.succeed stdout)
+        [ Stream.writeLineAsBytes "DDD"
+        , Stream.writeLineAsBytes "EEE"
+        , Stream.writeLineAsBytes "FFF"
+        ]
+
+
+printManyMoreTimes : Stream.Writable Bytes.Bytes -> Task Stream.Error (Stream.Writable Bytes.Bytes)
+printManyMoreTimes stdout =
+    [ Stream.writeLineAsBytes "GGG"
+    , Stream.writeLineAsBytes "HHH"
+    , Stream.writeLineAsBytes "III"
+    ]
+    |> Array.map (\f -> f stdout)
+    |> Task.sequence
+    |> Task.andThen (\_ -> Task.succeed stdout)

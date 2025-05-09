@@ -1,0 +1,164 @@
+module Main3 exposing (main)
+
+import Init
+import Node exposing (Environment)
+import Task exposing (Task)
+import Stream
+import Bytes exposing (Bytes)
+import Process
+import Dict exposing (Dict)
+import HttpServer exposing (Request, Server)
+import HttpServer.Response as Response exposing (Response)
+
+{-
+
+echo ./src/Main3.gren | entr -rc bash -c 'gren make ./src/Main3.gren && PORT=3000 node app'
+
+ -}
+
+
+red : String
+red =
+    "\u{001B}[31m"
+
+yellow : String
+yellow =
+    "\u{001B}[33m"
+
+blue : String
+blue =
+    "\u{001B}[34m"
+
+
+
+reset : String
+reset =
+    "\u{001B}[0m"
+
+
+puts : String -> Stream.Writable Bytes -> Task Never {}
+puts str stdout =
+    Stream.writeLineAsBytes str stdout
+    |> Task.map (\_ -> {})
+    |> Task.onError (\_ -> Task.succeed {})
+
+
+-- puts : String -> Stream.Writable Bytes -> Cmd Msg
+-- puts str stdout =
+--     Stream.writeLineAsBytes str stdout
+--     |> Task.map (\_ -> {})
+--     |> Task.onError (\_ -> Task.succeed {})
+--     |> Task.execute
+
+
+type Model
+    = StartingUp { port_ : Int, stdout : Stream.Writable Bytes }
+    | StartingUpFailed
+    | Running Server
+
+type alias RunningModel
+    = {}
+
+
+type Msg
+    = ServerCreated (Result HttpServer.ServerError Server)
+    | GotRequest { req : Request, res : Response }
+    | NOOP
+
+main : Node.Program Model Msg
+main =
+    Node.defineProgram
+        { init = init
+        , update = update
+        , subscriptions = subscriptions
+        }
+
+subscriptions : Model -> Sub Msg
+subscriptions model =
+    when model is
+        StartingUp _ ->
+            Sub.none
+        StartingUpFailed ->
+            Sub.none
+        Running server ->
+            HttpServer.onRequest server
+                (\req res -> GotRequest {req = req, res = res})
+
+init : Environment -> Init.Task { model : Model, command : Cmd Msg }
+init env =
+    Init.awaitTask Node.getEnvironmentVariables <| \vars ->
+    Init.await HttpServer.initialize <| \serverPermissions ->
+        let
+            port_ =
+                Dict.get "PORT" vars
+                |> Maybe.andThen String.toInt
+                |> Maybe.withDefault 8080
+        in
+        Node.startProgram
+            { model = StartingUp { port_ = port_, stdout = env.stdout }
+            , command =
+                Task.attempt ServerCreated <|
+                    HttpServer.createServer serverPermissions
+                        { host = "localhost"
+                        , port_ = port_
+                        }
+            }
+
+printServerSuccess : Stream.Writable Bytes -> Cmd Msg
+printServerSuccess stdout =
+    Task.succeed stdout
+    |> Task.andThen (\_ -> puts "Server created successfully" stdout)
+    |> Task.andThen (\_ -> puts "wat" stdout)
+    |> Task.execute
+
+printServerSuccess2 : Stream.Writable Bytes -> Cmd Msg
+printServerSuccess2 stdout =
+    [ puts "Server created successfully"
+    , puts "Now I will server requests"
+    ]
+    |> Array.map (\f -> f stdout)
+    |> Task.sequence
+    |> Task.execute
+
+update : Msg -> Model -> { model : Model, command : Cmd Msg }
+update msg model =
+    let
+        noop = { model = model, command = Cmd.none }
+    in
+    when msg is
+        ServerCreated result ->
+            when model is
+                StartingUp { port_ = port_, stdout } ->
+                    when result is
+                        Ok server ->
+                            { model = Running server
+                            , command =
+                                [ puts <| "Server booting up!"
+                                , puts <| "Listening on port " ++ blue ++ (String.fromInt port_) ++ reset ++ "!"
+                                ]
+                                |> Array.map (\f -> f stdout)
+                                |> Task.sequence
+                                |> Task.execute
+
+                            }
+                        Err error ->
+                            let _ = Debug.log "Server error" error in
+                            { model = StartingUpFailed
+                            , command =
+                                Task.succeed {}
+                                |> Task.andThen (\{} -> puts (red ++ "Server failed to start" ++ reset) stdout)
+                                |> Task.andThen (\{} -> Node.exitWithCode 1)
+                                |> Task.execute
+                            }
+
+                _ -> noop
+        GotRequest {req, res} ->
+            let _ = Debug.log "Request" req in
+            { model = model
+            , command =
+                res
+                |> Response.setBody ("You requested: " ++ req.url.path)
+                |> Response.send
+            }
+        NOOP ->
+            noop

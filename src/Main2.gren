@@ -1,0 +1,92 @@
+module Main2 exposing (main)
+
+import Init
+import Node exposing (Environment)
+import Task exposing (Task)
+import Stream
+import Bytes
+import Process
+import Dict exposing (Dict)
+
+type alias Model
+    = { stdout : Stream.Writable Bytes.Bytes
+      , vars : Dict String String
+      }
+
+type Msg
+    = GotPrintResult (Result Stream.Error (Stream.Writable Bytes.Bytes))
+    | Printed
+
+main : Node.Program Model Msg
+main =
+    Node.defineProgram
+        { init = init
+        , update = update
+        , subscriptions = \_ -> Sub.none
+        }
+
+
+minimalVars : Dict String String -> Dict String String
+minimalVars =
+    Dict.foldl (\k v acc ->
+        if Array.member k ["SHELL", "TERM", "USER", "HOME"] then
+            Dict.set k v acc
+        else
+            acc
+    ) Dict.empty
+
+
+init : Environment -> Init.Task { model : Model, command : Cmd Msg }
+init env =
+    Init.awaitTask Node.getEnvironmentVariables <| \vars ->
+        Node.startProgram
+            { model =
+                { stdout = env.stdout
+                , vars = minimalVars vars
+                }
+            , command =
+                Cmd.batch
+                    [ Task.attempt GotPrintResult (printManyTimes env.stdout)
+                    , Task.perform -- This one works, but the program exits before it has a chance to print
+                        (\_ -> Printed)
+                        (Task.onError
+                            (\_ -> Task.succeed env.stdout)
+                            (printManyMoreTimes env.stdout)
+                        )
+                    ]
+            }
+
+
+update : Msg -> Model -> { model : Model, command : Cmd Msg }
+update msg model =
+    when msg is
+        GotPrintResult _ ->
+            { model = model
+            , command = Cmd.none
+            }
+        Printed ->
+            let _ = Debug.log "Printed" model in
+            { model = model
+            , command = Cmd.none
+            }
+
+printManyTimes : Stream.Writable Bytes.Bytes -> Task Stream.Error (Stream.Writable Bytes.Bytes)
+printManyTimes stdout =
+    Array.foldl
+        Task.andThen
+        (Task.succeed stdout)
+        [ Stream.writeLineAsBytes "AAA"
+        , Stream.writeLineAsBytes "BBB"
+        , Stream.writeLineAsBytes "CCC"
+        ]
+
+
+printManyMoreTimes : Stream.Writable Bytes.Bytes -> Task Stream.Error (Stream.Writable Bytes.Bytes)
+printManyMoreTimes stdout =
+    [ Stream.writeLineAsBytes "GGG"
+    , Stream.writeLineAsBytes "HHH"
+    , Stream.writeLineAsBytes "III"
+    ]
+    |> Array.map (\f -> f stdout)
+    |> Task.sequence
+    |> Task.andThen (\_ -> Task.succeed stdout)
