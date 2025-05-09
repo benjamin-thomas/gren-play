@@ -1,4 +1,4 @@
-module Main3 exposing (..)
+port module Main3 exposing (..)
 
 import Init
 import Node exposing (Environment)
@@ -13,9 +13,15 @@ import Url.Parser as P exposing ((</>), (<?>))
 import Url exposing (Url)
 import Url.Parser.Query as Query
 
+
+port toJS : String -> Cmd msg
+port fromJS : (String -> msg) -> Sub msg
+
+
 {-
 
 echo ./src/Main3.gren | entr -rc bash -c 'gren make ./src/Main3.gren && PORT=3000 node app'
+rg --type-add 'gren:*.gren' -t gren --files | entr -rc bash -c 'gren make ./src/Main3.gren --output=main.js && PORT=4000 node ./start.js'
 
  -}
 
@@ -89,19 +95,24 @@ urlToRoute url =
                 { url | query = dropQuestion query }
         )
 
-type Model
-    = StartingUp { port_ : Int, stdout : Stream.Writable Bytes }
+
+type Status
+    = StartingUp { port_ : Int }
     | StartingUpFailed
     | Running Server
 
-type alias RunningModel
-    = {}
+
+type alias Model =
+    { status : Status
+    , stdout : Stream.Writable Bytes
+    }
 
 
 type Msg
     = ServerCreated (Result HttpServer.ServerError Server)
     | GotRequest { req : Request, res : Response }
     | NOOP
+    | Rcv String
 
 main : Node.Program Model Msg
 main =
@@ -114,14 +125,17 @@ main =
 
 subscriptions : Model -> Sub Msg
 subscriptions model =
-    when model is
-        StartingUp _ ->
-            Sub.none
-        StartingUpFailed ->
-            Sub.none
-        Running server ->
-            HttpServer.onRequest server
-                (\req res -> GotRequest {req = req, res = res})
+    Sub.batch
+        [ fromJS Rcv
+        , when model.status is
+            StartingUp _ ->
+                Sub.none
+            StartingUpFailed ->
+                Sub.none
+            Running server ->
+                HttpServer.onRequest server
+                    (\req res -> GotRequest {req = req, res = res})
+        ]
 
 init : Environment -> Init.Task { model : Model, command : Cmd Msg }
 init env =
@@ -134,7 +148,10 @@ init env =
                 |> Maybe.withDefault 8080
         in
         Node.startProgram
-            { model = StartingUp { port_ = port_, stdout = env.stdout }
+            { model =
+                { status = StartingUp { port_ = port_ }
+                , stdout = env.stdout
+                }
             , command =
                 Task.attempt ServerCreated <|
                     HttpServer.createServer serverPermissions
@@ -190,11 +207,15 @@ serveRequest req res =
             |> Response.setStatus 404
             |> Response.send
         Just route ->
-            Response.send <|
-                when route is
-                    Home    -> homeResponse res
-                    Blogs   -> blogsResponse res
-                    Blog params -> blogResponse params res
+            Cmd.batch
+                [ Response.send <|
+                    when route is
+                        Home    -> homeResponse res
+                        Blogs   -> blogsResponse res
+                        Blog params -> blogResponse params res
+                , toJS "Serving a request"
+                ]
+
 
 
 update : Msg -> Model -> { model : Model, command : Cmd Msg }
@@ -204,11 +225,11 @@ update msg model =
     in
     when msg is
         ServerCreated result ->
-            when model is
-                StartingUp { port_ = port_, stdout } ->
+            when model.status is
+                StartingUp { port_ = port_ } ->
                     when result is
                         Ok server ->
-                            { model = Running server
+                            { model = { model | status = Running server }
                             , command =
                                 [ puts <| "Server booting up!"
                                 , puts <| "Listening on port "
@@ -217,17 +238,17 @@ update msg model =
                                        ++ reset
                                        ++ "!"
                                 ]
-                                |> Array.map (\f -> f stdout)
+                                |> Array.map (\f -> f model.stdout)
                                 |> Task.sequence
                                 |> Task.execute
 
                             }
                         Err error ->
                             -- let _ = Debug.log "Server error" error in
-                            { model = StartingUpFailed
+                            { model = { model | status = StartingUpFailed }
                             , command =
                                 Task.succeed {}
-                                |> Task.andThen (\{} -> puts (red ++ "Server failed to start" ++ reset) stdout)
+                                |> Task.andThen (\{} -> puts (red ++ "Server failed to start" ++ reset) model.stdout)
                                 |> Task.andThen (\{} -> Node.exitWithCode 1)
                                 |> Task.execute
                             }
@@ -237,7 +258,14 @@ update msg model =
             -- let _ = Debug.log "Request URL" req.url in
             { model = model
             , command = serveRequest req res
+            }
 
+        Rcv str ->
+            -- let _ = Debug.log "Rcv" str in
+            { model = model
+            , command =
+                puts ("Rcv :: " ++ yellow ++ str ++ reset) model.stdout
+                |> Task.execute
             }
         NOOP ->
             noop
