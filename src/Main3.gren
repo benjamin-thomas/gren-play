@@ -12,10 +12,22 @@ import HttpServer.Response as Response exposing (Response)
 import Url.Parser as P exposing ((</>), (<?>))
 import Url exposing (Url)
 import Url.Parser.Query as Query
+import Json.Decode as Decode exposing (Decoder)
+import Json.Encode as Encode
 
 
-port toJS : String -> Cmd msg
-port fromJS : (String -> msg) -> Sub msg
+-- Define RequestId as an opaque type (just a counter)
+type alias RequestId = Int
+
+-- Define a type for the response with users
+type alias UsersResponse =
+    { requestId : RequestId
+    , users : Array String
+    }
+
+-- Database request port (synchronous)
+port getDbUsers : {requestId : Int} -> Cmd msg
+port gotDbUsers : (UsersResponse -> msg) -> Sub msg
 
 
 {-
@@ -56,6 +68,7 @@ type Route
     = Home
     | Blogs
     | Blog { id : Int, subSectionId : Maybe Int, other : Bool }
+    | Users
 
 routeParser : P.Parser (Route -> a) a
 routeParser =
@@ -73,6 +86,7 @@ routeParser =
                     }
             )
             (P.s "blog" </> P.int <?> Query.string "q" <?> Query.string "r")
+        , P.map Users (P.s "users")
         ]
 
 
@@ -105,14 +119,15 @@ type Status
 type alias Model =
     { status : Status
     , stdout : Stream.Writable Bytes
+    , pendingRequests : Dict Int Response
+    , nextRequestId : Int
     }
 
 
 type Msg
     = ServerCreated (Result HttpServer.ServerError Server)
     | GotRequest { req : Request, res : Response }
-    | NOOP
-    | Rcv String
+    | GotDbUsers UsersResponse
 
 main : Node.Program Model Msg
 main =
@@ -126,7 +141,7 @@ main =
 subscriptions : Model -> Sub Msg
 subscriptions model =
     Sub.batch
-        [ fromJS Rcv
+        [ gotDbUsers GotDbUsers
         , when model.status is
             StartingUp _ ->
                 Sub.none
@@ -151,6 +166,8 @@ init env =
             { model =
                 { status = StartingUp { port_ = port_ }
                 , stdout = env.stdout
+                , pendingRequests = Dict.empty
+                , nextRequestId = 1
                 }
             , command =
                 Task.attempt ServerCreated <|
@@ -190,33 +207,30 @@ blogsResponse =
 -- http -v localhost:4000/blog/1 q==42 r==1
 blogResponse : { id : Int, subSectionId : Maybe Int, other : Bool } -> Response -> Response
 blogResponse {id, subSectionId, other } =
-    let _ = Debug.log "blogResponse" {id = id, subSectionId = subSectionId, other = other } in
+    -- let _ = Debug.log "blogResponse" {id = id, subSectionId = subSectionId, other = other } in
     Response.setBody <|
         "You requested: Blog id "
         ++ String.fromInt id
-        ++ " (params="
-        ++ (Debug.toString {id = id, subSectionId = subSectionId, other = other })
-        ++ ")"
 
 
-serveRequest : Request -> Response -> Cmd Msg
-serveRequest req res =
-    when urlToRoute req.url is
-        Nothing ->
-            res
-            |> Response.setStatus 404
-            |> Response.send
-        Just route ->
-            Cmd.batch
-                [ Response.send <|
-                    when route is
-                        Home    -> homeResponse res
-                        Blogs   -> blogsResponse res
-                        Blog params -> blogResponse params res
-                , toJS "Serving a request"
-                ]
+serveRequest : { requestId : Int } -> Route -> Request -> Response -> Cmd Msg
+serveRequest { requestId } route req res =
+    when route is
+        Home ->
+            Response.send <| homeResponse res
+        Blogs ->
+            Response.send <| blogsResponse res
+        Blog params ->
+            Response.send <| blogResponse params res
+        Users ->
+            getDbUsers { requestId = requestId }
 
 
+
+logMessage : String -> String -> Stream.Writable Bytes -> Cmd Msg
+logMessage prefix message stdout =
+    puts (prefix ++ " :: " ++ yellow ++ message ++ reset) stdout
+    |> Task.execute
 
 update : Msg -> Model -> { model : Model, command : Cmd Msg }
 update msg model =
@@ -255,17 +269,49 @@ update msg model =
 
                 _ -> noop
         GotRequest {req, res} ->
-            -- let _ = Debug.log "Request URL" req.url in
-            { model = model
-            , command = serveRequest req res
-            }
+            let
+                newModel =
+                    { model | nextRequestId = model.nextRequestId + 1
+                    , pendingRequests = Dict.set
+                        model.nextRequestId
+                        res
+                        model.pendingRequests
+                    }
 
-        Rcv str ->
-            -- let _ = Debug.log "Rcv" str in
-            { model = model
-            , command =
-                puts ("Rcv :: " ++ yellow ++ str ++ reset) model.stdout
-                |> Task.execute
+            in
+            when urlToRoute req.url is
+                Nothing ->
+                    { model = newModel
+                    , command =
+                        res
+                        |> Response.setStatus 404
+                        |> Response.send
+                    }
+                Just route ->
+                    { model = newModel
+                    , command = serveRequest
+                                    { requestId = model.nextRequestId }
+                                    route
+                                    req
+                                    res
+                    }
+
+        GotDbUsers {requestId, users} ->
+            let
+                jsonResponse =
+                    Encode.encode 2 <|
+                        Encode.array Encode.string users
+
+                closeHttpConnection =
+                    when Dict.get requestId model.pendingRequests is
+                        Just res ->
+                            res
+                            |> Response.setHeader "Content-Type" "application/json"
+                            |> Response.setBody jsonResponse
+                            |> Response.send
+                        Nothing ->
+                            Cmd.none
+            in
+            { model = { model | pendingRequests = Dict.remove requestId model.pendingRequests }
+            , command = closeHttpConnection
             }
-        NOOP ->
-            noop
