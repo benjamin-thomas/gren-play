@@ -1,20 +1,18 @@
 // gren make ./src/WebServerMain.gren --output=main.js && PORT=4000 node --inspect ./start.js
 
 const main = require("./main.js");
-const app = main.Gren.WebServerMain.init({})
+const app = main.Gren.WebServerMain.init({});
+
+const users = [
+    "John Doe",
+    "Jane Smith",
+];
 
 // Mock database function to simulate fetching users from a database
 const getDbUsers = () => {
     // Return a fixed list of users for simplicity
-    return [
-        "John Doe",
-        "Jane Smith",
-        "Robert Johnson",
-        "Emily Davis",
-        "Michael Brown",
-        "Sarah Wilson"
-    ];
-}
+    return users;
+};
 
 const getDbUsersPromise = () => {
     return new Promise((resolve) => {
@@ -22,7 +20,7 @@ const getDbUsersPromise = () => {
             resolve(getDbUsers());
         }, 2000);
     });
-}
+};
 
 const handleGetUsers = (requestId, cb) => {
     const mode = "setTimeout";
@@ -43,7 +41,7 @@ const handleGetUsers = (requestId, cb) => {
             console.log(`[APP] DB END (setTimeout)`);
         }, 2000);
     }
-}
+};
 
 app.ports.getDbData.subscribe(({ requestId, operation }) => {
     console.log(`[APP] GET DB DATA`, { requestId, operation });
@@ -54,7 +52,7 @@ app.ports.getDbData.subscribe(({ requestId, operation }) => {
                 app.ports.gotDbData.send({
                     requestId,
                     users: data
-                })
+                });
             });
             return;
         }
@@ -74,6 +72,19 @@ app.ports.getDbData.subscribe(({ requestId, operation }) => {
                 });
             }, 1000);
             return;
+        }
+        case "postUser": {
+            const { firstName, lastName } = operation;
+            const user = `${firstName} ${lastName}`;
+            console.log(`[APP] GOT DB DATA (postUser2)`, { user });
+            users.push(user);
+            app.ports.gotDbData.send({
+                requestId,
+                created: true,
+            });
+            return;
+
+
         }
     }
     console.error(`[APP] GOT DB DATA (operation not found)`, operation);

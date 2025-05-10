@@ -7,7 +7,7 @@ import Stream
 import Bytes exposing (Bytes)
 import Process
 import Dict exposing (Dict)
-import HttpServer exposing (Request, Server)
+import HttpServer exposing (Request, Server, Method(..))
 import HttpServer.Response as Response exposing (Response)
 import Url.Parser as P exposing ((</>), (<?>))
 import Url exposing (Url)
@@ -15,17 +15,34 @@ import Url.Parser.Query as Query
 import Json.Encode as E
 import Json.Decode as D exposing (Decoder)
 import Time
+import Bytes.Decode as BD
+import Bytes exposing (Endianness(..))
 
+{-
+
+echo ./src/WebServerMain.gren | entr -rc bash -c 'gren make ./src/WebServerMain.gren && PORT=3000 node app'
+rg --type-add 'gren:*.gren' -t gren -t js --files | entr -rc bash -c 'gren make ./src/WebServerMain.gren --output=main.js && PORT=4000 node ./start.js'
+
+ -}
 
 type DbGetPayload
     = AllUsers (Array String)
     | OneUser String
+    | ResourceCreated
 
 dbPayloadDecoder : Decoder DbGetPayload
 dbPayloadDecoder =
     D.oneOf
         [ D.field "users" <| D.map AllUsers (D.array D.string)
         , D.field "user"  <| D.map OneUser   D.string
+        , D.field "created" D.bool
+            |> D.andThen
+                (\b ->
+                    if b then
+                        D.succeed ResourceCreated
+                    else
+                        D.fail "not created"
+                )
         ]
 
 type alias DbResponse =
@@ -51,9 +68,25 @@ port getDbData : E.Value -> Cmd msg
 port gotDbData : (D.Value -> msg) -> Sub msg
 
 
+type alias PostUserPayload =
+    { firstName : String
+    , lastName : String
+    }
+
+mkPostUserPayload : String -> String -> PostUserPayload
+mkPostUserPayload firstName lastName =
+    { firstName = firstName, lastName = lastName }
+
+postUserPayloadDecoder : Decoder PostUserPayload
+postUserPayloadDecoder =
+    D.map2 mkPostUserPayload
+        (D.field "firstName" D.string)
+        (D.field "lastName" D.string)
+
 type DbOperation
     = GetUsers
     | GetUser Int
+    | PostUser PostUserPayload
 
 dbOperationEncoder : DbOperation -> E.Value
 dbOperationEncoder operation =
@@ -68,6 +101,13 @@ dbOperationEncoder operation =
                 , { key = "userId", value = E.int id }
                 ]
 
+        PostUser {firstName, lastName} ->
+            E.object
+                [ { key = "kind",      value = E.string "postUser" }
+                , { key = "firstName", value = E.string firstName }
+                , { key = "lastName",  value = E.string lastName }
+                ]
+
 
 getDbDataEncoder : { requestId : Int, operation : DbOperation } -> E.Value
 getDbDataEncoder { requestId, operation } =
@@ -75,14 +115,6 @@ getDbDataEncoder { requestId, operation } =
         [ {key = "requestId", value = E.int requestId}
         , {key = "operation", value = dbOperationEncoder operation}
         ]
-
-{-
-
-echo ./src/WebServerMain.gren | entr -rc bash -c 'gren make ./src/WebServerMain.gren && PORT=3000 node app'
-rg --type-add 'gren:*.gren' -t gren -t js --files | entr -rc bash -c 'gren make ./src/WebServerMain.gren --output=main.js && PORT=4000 node ./start.js'
-
- -}
-
 
 red : String
 red =
@@ -179,7 +211,7 @@ type alias Model =
 
 type Msg
     = ServerCreated (Result HttpServer.ServerError Server)
-    | StartRequest { req : Request, res : Response }
+    | StartRequest  { req : Request, res : Response }
     | HandleRequest { req : Request, res : Response, now : Time.Posix }
     | GotDbData D.Value
     | TimeOut RequestId
@@ -268,6 +300,40 @@ blogResponse {id, subSectionId, other } =
         ++ String.fromInt id
 
 
+type PayloadDecodeError
+    = WeirdBody
+    | BodyTooBig Int
+    | JsonErr D.Error
+
+
+decodeBodyPayload : Decoder a -> Request -> Result PayloadDecodeError a
+decodeBodyPayload myDecoder req =
+    let
+        mSize : Maybe Int
+        mSize =
+            req.headers
+            |> Dict.get "Content-Length"
+            |> Maybe.andThen String.toInt
+
+        -- 8 × 1024 = 8192 (nodejs max header size, apparently)
+        maxSize = 8 * 1024
+    in
+    when mSize is
+        Nothing ->
+            Err WeirdBody
+
+        Just size ->
+            if size > maxSize then
+                Err (BodyTooBig size)
+            else
+                when BD.decode (BD.string size) req.body is
+                    Nothing ->
+                        Err WeirdBody
+                    Just str ->
+                        D.decodeString myDecoder str
+                        |> Result.mapError JsonErr
+
+
 serveRequest : { requestId : Int } -> Route -> Request -> Response -> Cmd Msg
 serveRequest { requestId } route req res =
     when route is
@@ -278,10 +344,37 @@ serveRequest { requestId } route req res =
         Blog params ->
             Response.send <| blogResponse params res
         Users ->
-            let _ = Debug.log "serving users" in
-            getDbData <|
-                getDbDataEncoder
-                    { requestId = requestId, operation = GetUsers }
+            when req.method is
+                GET ->
+                    getDbData <|
+                        getDbDataEncoder
+                            { requestId = requestId, operation = GetUsers }
+
+                POST ->
+                    -- http POST localhost:4000/users/ firstName=Benjamin lastName=Thomas && http GET localhost:4000/users/
+                    when decodeBodyPayload postUserPayloadDecoder req is
+                        Ok data ->
+                            getDbData <|
+                                getDbDataEncoder
+                                    { requestId = requestId, operation = PostUser data }
+                        Err err ->
+                            res
+                            |> Response.setStatus 400
+                            |> Response.setBody
+                                (when err is
+                                    WeirdBody ->
+                                        "Weird body"
+                                    BodyTooBig size ->
+                                        "Body is too big: " ++ String.fromInt size
+                                    JsonErr jsonErr ->
+                                        D.errorToString jsonErr
+                                )
+                            |> Response.send
+
+                _ ->
+                    res
+                    |> Response.setStatus 405
+                    |> Response.send
 
         User userId ->
             let _ = Debug.log "serving user" userId in
@@ -433,21 +526,35 @@ update msg model =
 sendJsonSuccess : { requestId : Int } -> Dict Int PendingRequest -> DbGetPayload -> Cmd Msg
 sendJsonSuccess {requestId} pendingRequests payload =
     let
-        jsonResponse =
-            E.encode 2 <|
-                when payload is
-                    AllUsers users ->
-                        E.array E.string users
-                    OneUser user ->
-                        E.object
-                            [ { key = "user", value = E.string user }
-                            ]
+        x : {jsonResponse : Maybe E.Value, status : Int}
+        x =
+            when payload is
+                AllUsers users ->
+                    { jsonResponse = Just <| E.array E.string users
+                    , status = 200
+                    }
+                OneUser user ->
+                    { jsonResponse = Just <| E.object
+                        [ { key = "user", value = E.string user }
+                        ]
+                    , status = 200
+                    }
+                ResourceCreated ->
+                    { jsonResponse = Nothing
+                    , status = 201
+                    }
     in
     when Dict.get requestId pendingRequests is
         Just {response} ->
             response
             |> Response.setHeader "Content-Type" "application/json"
-            |> Response.setBody jsonResponse
+            |> (when x.jsonResponse is
+                    Just value ->
+                        Response.setBody (E.encode 2 value)
+                    Nothing ->
+                        identity
+                )
+            |> Response.setStatus x.status
             |> Response.send
         Nothing ->
             Cmd.none
