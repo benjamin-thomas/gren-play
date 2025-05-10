@@ -1,7 +1,7 @@
-// gren make ./src/Main3.gren --output=main.js && PORT=4000 node --inspect ./start.js
+// gren make ./src/WebServerMain.gren --output=main.js && PORT=4000 node --inspect ./start.js
 
 const main = require("./main.js");
-const app = main.Gren.Main3.init({})
+const app = main.Gren.WebServerMain.init({})
 
 // Mock database function to simulate fetching users from a database
 const getDbUsers = () => {

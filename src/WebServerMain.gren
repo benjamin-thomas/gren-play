@@ -1,4 +1,4 @@
-port module Main3 exposing (..)
+port module WebServerMain exposing (..)
 
 import Init
 import Node exposing (Environment)
@@ -68,8 +68,8 @@ getDbDataEncoder { requestId, operation } =
 
 {-
 
-echo ./src/Main3.gren | entr -rc bash -c 'gren make ./src/Main3.gren && PORT=3000 node app'
-rg --type-add 'gren:*.gren' -t gren -t js --files | entr -rc bash -c 'gren make ./src/Main3.gren --output=main.js && PORT=4000 node ./start.js'
+echo ./src/WebServerMain.gren | entr -rc bash -c 'gren make ./src/WebServerMain.gren && PORT=3000 node app'
+rg --type-add 'gren:*.gren' -t gren -t js --files | entr -rc bash -c 'gren make ./src/WebServerMain.gren --output=main.js && PORT=4000 node ./start.js'
 
  -}
 
