@@ -12,26 +12,64 @@ import HttpServer.Response as Response exposing (Response)
 import Url.Parser as P exposing ((</>), (<?>))
 import Url exposing (Url)
 import Url.Parser.Query as Query
-import Json.Decode as Decode exposing (Decoder)
-import Json.Encode as Encode
+import Json.Encode as E
+import Json.Decode as D exposing (Decoder)
 import Time
 
 
--- Define a type for the response with users
-type alias UsersResponse =
+type DbGetPayload =
+    AllUsers (Array String)
+
+dbPayloadDecoder : Decoder DbGetPayload
+dbPayloadDecoder =
+    D.oneOf
+        [ D.field "users" <| D.map AllUsers (D.array D.string)
+        ]
+
+type alias DbResponse =
     { requestId : Int
-    , users : Array String
+    , payload : DbGetPayload
     }
 
--- Database request port (synchronous)
-port getDbUsers : {requestId : Int} -> Cmd msg
-port gotDbUsers : (UsersResponse -> msg) -> Sub msg
+
+mkDbResponse : Int -> DbGetPayload -> DbResponse
+mkDbResponse requestId payload =
+    { requestId = requestId, payload = payload }
+
+
+dbResponseDecoder : Decoder DbResponse
+dbResponseDecoder =
+    D.map2 mkDbResponse
+        (D.field "requestId" D.int)
+        (dbPayloadDecoder)
+
+type alias RequestId = Int
+
+port getDbData : E.Value -> Cmd msg
+port gotDbData : (D.Value -> msg) -> Sub msg
+
+
+type DbOperation = GetUsers
+
+dbOperationEncoder : DbOperation -> E.Value
+dbOperationEncoder operation =
+    when operation is
+        GetUsers -> E.string "getUsers"
+
+
+getDbDataEncoder : { requestId : Int, operation : DbOperation } -> E.Value
+getDbDataEncoder { requestId, operation } =
+    E.object
+        [ {key = "requestId", value = E.int requestId}
+        , {key = "operation", value = dbOperationEncoder operation}
+        ]
+
 
 
 {-
 
 echo ./src/Main3.gren | entr -rc bash -c 'gren make ./src/Main3.gren && PORT=3000 node app'
-rg --type-add 'gren:*.gren' -t gren --files | entr -rc bash -c 'gren make ./src/Main3.gren --output=main.js && PORT=4000 node ./start.js'
+rg --type-add 'gren:*.gren' -t gren -t js --files | entr -rc bash -c 'gren make ./src/Main3.gren --output=main.js && PORT=4000 node ./start.js'
 
  -}
 
@@ -131,7 +169,7 @@ type Msg
     = ServerCreated (Result HttpServer.ServerError Server)
     | StartRequest { req : Request, res : Response }
     | HandleRequest { req : Request, res : Response, now : Time.Posix }
-    | GotDbUsers UsersResponse
+    | GotDbData D.Value
 
 main : Node.Program Model Msg
 main =
@@ -145,7 +183,7 @@ main =
 subscriptions : Model -> Sub Msg
 subscriptions model =
     Sub.batch
-        [ gotDbUsers GotDbUsers
+        [ gotDbData GotDbData
         , when model.status is
             StartingUp _ ->
                 Sub.none
@@ -227,7 +265,9 @@ serveRequest { requestId } route req res =
         Blog params ->
             Response.send <| blogResponse params res
         Users ->
-            getDbUsers { requestId = requestId }
+            getDbData <|
+                getDbDataEncoder
+                    { requestId = requestId, operation = GetUsers }
 
 
 
@@ -249,6 +289,8 @@ evictStaleRequests { now } =
             Dict.set k v acc
     )
     Dict.empty
+
+
 
 update : Msg -> Model -> { model : Model, command : Cmd Msg }
 update msg model =
@@ -302,7 +344,7 @@ update msg model =
                         model.nextRequestId
                         { response = res, startedAt = now}
                         (model.pendingRequests |> evictStaleRequests { now = now })
-                
+
                 newModel =
                     { model | nextRequestId = model.nextRequestId + 1
                     , pendingRequests = newPendingRequests
@@ -320,28 +362,48 @@ update msg model =
                 Just route ->
                     { model = newModel
                     , command = serveRequest
-                                    { requestId = model.nextRequestId }
+                                    { requestId = model.nextRequestId
+                                    }
                                     route
                                     req
                                     res
                     }
 
-        GotDbUsers {requestId, users} ->
-            let
-                jsonResponse =
-                    Encode.encode 2 <|
-                        Encode.array Encode.string users
+        GotDbData value ->
+            when D.decodeValue dbResponseDecoder value is
+                Ok {requestId, payload} ->
+                    { model = { model | pendingRequests = Dict.remove requestId model.pendingRequests }
+                    , command =
+                        buildJsonSuccess
+                            { requestId = requestId }
+                            model.pendingRequests
+                            payload
+                    }
+                Err err ->
+                    let _ = Debug.log "GotDbData error!!" err in
+                    -- FIXME: big problem here, I cannot close the request so I should probably shutdown
+                    -- FIXME: the server, or create a FatalError state?
+                    { model = model
+                    , command = Cmd.none
+                    }
 
-                closeHttpConnection =
-                    when Dict.get requestId model.pendingRequests is
-                        Just {response} ->
-                            response
-                            |> Response.setHeader "Content-Type" "application/json"
-                            |> Response.setBody jsonResponse
-                            |> Response.send
-                        Nothing ->
-                            Cmd.none
-            in
-            { model = { model | pendingRequests = Dict.remove requestId model.pendingRequests }
-            , command = closeHttpConnection
-            }
+
+
+buildJsonSuccess : { requestId : Int } -> Dict Int PendingRequest -> DbGetPayload -> Cmd Msg
+buildJsonSuccess {requestId} pendingRequests payload =
+    let
+        jsonResponse =
+            E.encode 2 <|
+                when payload is
+                    AllUsers users ->
+                        E.array E.string users
+    in
+    when Dict.get requestId pendingRequests is
+        Just {response} ->
+            response
+            |> Response.setHeader "Content-Type" "application/json"
+            |> Response.setBody jsonResponse
+            |> Response.send
+        Nothing ->
+            Cmd.none
+

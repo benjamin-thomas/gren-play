@@ -24,50 +24,43 @@ const getDbUsersPromise = () => {
     });
 }
 
-
-
-app.ports.getDbUsers.subscribe(({ requestId }) => {
-    console.log(`[APP] DB START`, { requestId });
-
+const handleGetUsers = (requestId, cb) => {
     const mode = "setTimeout";
 
     if (mode === "sync") {
         (() => {
-            const users = getDbUsers();
-
-            const response = {
-                requestId,
-                users: users
-            };
-
-            app.ports.gotDbUsers.send(response);
-
+            cb(getDbUsers());
             console.log(`[APP] DB END (sync)`);
         })();
     } else if (mode === "promise") {
         getDbUsersPromise().then((users) => {
-            const response = {
-                requestId,
-                users: users
-            };
-
-            app.ports.gotDbUsers.send(response);
-
+            cb(users);
             console.log(`[APP] DB END (promise)`);
         });
     } else if (mode === "setTimeout") {
         setTimeout(() => {
-            const users = getDbUsers();
-
-            const response = {
-                requestId,
-                users: users
-            };
-
-            app.ports.gotDbUsers.send(response);
-
+            cb(getDbUsers());
             console.log(`[APP] DB END (setTimeout)`);
         }, 2000);
     }
+}
 
+app.ports.getDbData.subscribe(({ requestId, operation }) => {
+    console.log(`[APP] DB START`, { requestId, operation });
+
+    switch (operation) {
+        case "getUsers":
+            handleGetUsers(requestId, (data) => {
+                app.ports.gotDbData.send({
+                    requestId,
+                    users: data
+                })
+            });
+            break;
+        default:
+            console.error(`[APP] DB END (operation not found)`);
+            break;
+    }
+
+    console.log(`[APP] DB END (default)`);
 });
