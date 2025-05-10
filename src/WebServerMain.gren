@@ -17,13 +17,15 @@ import Json.Decode as D exposing (Decoder)
 import Time
 
 
-type DbGetPayload =
-    AllUsers (Array String)
+type DbGetPayload
+    = AllUsers (Array String)
+    | OneUser String
 
 dbPayloadDecoder : Decoder DbGetPayload
 dbPayloadDecoder =
     D.oneOf
         [ D.field "users" <| D.map AllUsers (D.array D.string)
+        , D.field "user"  <| D.map OneUser   D.string
         ]
 
 type alias DbResponse =
@@ -49,12 +51,22 @@ port getDbData : E.Value -> Cmd msg
 port gotDbData : (D.Value -> msg) -> Sub msg
 
 
-type DbOperation = GetUsers
+type DbOperation
+    = GetUsers
+    | GetUser Int
 
 dbOperationEncoder : DbOperation -> E.Value
 dbOperationEncoder operation =
     when operation is
-        GetUsers -> E.string "getUsers"
+        GetUsers ->
+            E.object
+                [ { key = "kind", value = E.string "getUsers" }
+                ]
+        GetUser id ->
+            E.object
+                [ { key = "kind",   value = E.string "getUser" }
+                , { key = "userId", value = E.int id }
+                ]
 
 
 getDbDataEncoder : { requestId : Int, operation : DbOperation } -> E.Value
@@ -103,6 +115,7 @@ type Route
     | Blogs
     | Blog { id : Int, subSectionId : Maybe Int, other : Bool }
     | Users
+    | User Int
 
 routeParser : P.Parser (Route -> a) a
 routeParser =
@@ -121,6 +134,7 @@ routeParser =
             )
             (P.s "blog" </> P.int <?> Query.string "q" <?> Query.string "r")
         , P.map Users (P.s "users")
+        , P.map User  (P.s "users" </> P.int)
         ]
 
 
@@ -264,17 +278,17 @@ serveRequest { requestId } route req res =
         Blog params ->
             Response.send <| blogResponse params res
         Users ->
-            Cmd.batch
-                [ getDbData <|
-                        getDbDataEncoder
-                            { requestId = requestId, operation = GetUsers }
+            let _ = Debug.log "serving users" in
+            getDbData <|
+                getDbDataEncoder
+                    { requestId = requestId, operation = GetUsers }
 
-                -- Ensures the connection always shuts down.
-                -- The connection may not shutdown if there was a problem decoding the
-                -- DB response for example.
-                , Process.sleep 5000
-                    |> Task.perform (\{} -> TimeOut requestId)
-                ]
+        User userId ->
+            let _ = Debug.log "serving user" userId in
+            getDbData <|
+                getDbDataEncoder
+                    { requestId = requestId, operation = GetUser userId }
+
 
 
 evictStaleRequests : { now : Time.Posix } -> Dict Int PendingRequest -> Dict Int PendingRequest
@@ -362,14 +376,25 @@ update msg model =
                         |> Response.send
                     }
                 Just route ->
+                    let
+                        requestId = model.nextRequestId
+                    in
                     { model = newModel
-                    , command = serveRequest
-                                    { requestId = model.nextRequestId
-                                    }
-                                    route
-                                    req
-                                    res
-                    }
+                    , command =
+                        Cmd.batch
+                            [ serveRequest
+                                { requestId = requestId
+                                }
+                                route
+                                req
+                                res
+
+                            -- Ensures the connection always shuts down. The connection may not shutdown
+                            --if there was a problem decoding the DB response for example.
+                            , Process.sleep 5000
+                                |> Task.perform (\{} -> TimeOut requestId)
+                            ]
+                        }
 
         GotDbData value ->
             when D.decodeValue dbResponseDecoder value is
@@ -413,6 +438,10 @@ sendJsonSuccess {requestId} pendingRequests payload =
                 when payload is
                     AllUsers users ->
                         E.array E.string users
+                    OneUser user ->
+                        E.object
+                            [ { key = "user", value = E.string user }
+                            ]
     in
     when Dict.get requestId pendingRequests is
         Just {response} ->

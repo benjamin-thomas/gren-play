@@ -46,21 +46,35 @@ const handleGetUsers = (requestId, cb) => {
 }
 
 app.ports.getDbData.subscribe(({ requestId, operation }) => {
-    console.log(`[APP] DB START`, { requestId, operation });
+    console.log(`[APP] GET DB DATA`, { requestId, operation });
 
-    switch (operation) {
-        case "getUsers":
+    switch (operation.kind) {
+        case "getUsers": {
             handleGetUsers(requestId, (data) => {
                 app.ports.gotDbData.send({
                     requestId,
                     users: data
                 })
             });
-            break;
-        default:
-            console.error(`[APP] DB END (operation not found)`);
-            break;
-    }
+            return;
+        }
+        case "getUser": {
+            setTimeout(() => {
+                const userId = operation.userId;
+                const users = getDbUsers();
+                const index = userId - 1;
 
-    console.log(`[APP] DB END (default)`);
+                // This can fail at runtime. Since we don't have error handling yet,
+                // the request won't terminate, but timeout.
+                const user = users[index];
+                console.log(`[APP] GOT DB DATA (getUser)`, { userId, user });
+                app.ports.gotDbData.send({
+                    requestId,
+                    user: user
+                });
+            }, 1000);
+            return;
+        }
+    }
+    console.error(`[APP] GOT DB DATA (operation not found)`, operation);
 });
