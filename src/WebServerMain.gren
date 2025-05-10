@@ -64,8 +64,6 @@ getDbDataEncoder { requestId, operation } =
         , {key = "operation", value = dbOperationEncoder operation}
         ]
 
-
-
 {-
 
 echo ./src/WebServerMain.gren | entr -rc bash -c 'gren make ./src/WebServerMain.gren && PORT=3000 node app'
@@ -170,6 +168,7 @@ type Msg
     | StartRequest { req : Request, res : Response }
     | HandleRequest { req : Request, res : Response, now : Time.Posix }
     | GotDbData D.Value
+    | TimeOut RequestId
 
 main : Node.Program Model Msg
 main =
@@ -265,28 +264,31 @@ serveRequest { requestId } route req res =
         Blog params ->
             Response.send <| blogResponse params res
         Users ->
-            getDbData <|
-                getDbDataEncoder
-                    { requestId = requestId, operation = GetUsers }
+            Cmd.batch
+                [ getDbData <|
+                        getDbDataEncoder
+                            { requestId = requestId, operation = GetUsers }
 
+                -- Ensures the connection always shuts down.
+                -- The connection may not shutdown if there was a problem decoding the
+                -- DB response for example.
+                , Process.sleep 5000
+                    |> Task.perform (\{} -> TimeOut requestId)
+                ]
 
-
-logMessage : String -> String -> Stream.Writable Bytes -> Cmd Msg
-logMessage prefix message stdout =
-    puts (prefix ++ " :: " ++ yellow ++ message ++ reset) stdout
-    |> Task.execute
 
 evictStaleRequests : { now : Time.Posix } -> Dict Int PendingRequest -> Dict Int PendingRequest
 evictStaleRequests { now } =
     let
         oneMinute =  60000
+        runningTime req = Time.posixToMillis now - Time.posixToMillis req.startedAt
     in
     Dict.foldl
-    (\k v acc ->
-        if Time.posixToMillis now - Time.posixToMillis v.startedAt > oneMinute then
+    (\k req acc ->
+        if runningTime req > oneMinute then
             acc
         else
-            Dict.set k v acc
+            Dict.set k req acc
     )
     Dict.empty
 
@@ -374,23 +376,37 @@ update msg model =
                 Ok {requestId, payload} ->
                     { model = { model | pendingRequests = Dict.remove requestId model.pendingRequests }
                     , command =
-                        buildJsonSuccess
+                        sendJsonSuccess
                             { requestId = requestId }
                             model.pendingRequests
                             payload
                     }
                 Err err ->
-                    let _ = Debug.log "GotDbData error!!" err in
-                    -- FIXME: big problem here, I cannot close the request so I should probably shutdown
-                    -- FIXME: the server, or create a FatalError state?
+                    -- let _ = Debug.log "GotDbData error!!" err in
                     { model = model
-                    , command = Cmd.none
+                    , command =
+                        puts "GotDbData decoding error!! The connection will be closed on timeout." model.stdout
+                        |> Task.execute
                     }
 
+        TimeOut requestId ->
+            { model = { model | pendingRequests = Dict.remove requestId model.pendingRequests }
+            , command =
+                when Dict.get requestId model.pendingRequests is
+                    Just {response} ->
+                        let _ = Debug.log "Forcing request shutdown" {requestId = requestId} in
+                        response
+                        |> Response.setStatus 500
+                        |> Response.setBody "Timeout"
+                        |> Response.send
+                    Nothing ->
+                        Cmd.none
+            }
 
 
-buildJsonSuccess : { requestId : Int } -> Dict Int PendingRequest -> DbGetPayload -> Cmd Msg
-buildJsonSuccess {requestId} pendingRequests payload =
+
+sendJsonSuccess : { requestId : Int } -> Dict Int PendingRequest -> DbGetPayload -> Cmd Msg
+sendJsonSuccess {requestId} pendingRequests payload =
     let
         jsonResponse =
             E.encode 2 <|
